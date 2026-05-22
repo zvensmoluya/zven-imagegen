@@ -1,7 +1,9 @@
-# Zven Imagegen
+# zven-imagegen
 
-一个给 Codex 用的图像生成 skill，面向“Codex 本身通过
-`base_url + key` 使用，但内置生图路径不太支持这个配置”的场景。
+Zven Imagegen 是这个 skill 的展示名。
+
+一个面向 Codex 的图像生成 skill，支持 `base_url + key` 和 `stream`
+流式传输，用来降低长连接超时断连的概率。
 
 它主要解决两件事：
 
@@ -21,7 +23,7 @@ Cloudflare 代理等方式使用 Codex，结果发现 Codex 的原生生图 skil
 仓库发布到 GitHub 后，最简单的方式是直接让 Codex 安装：
 
 ```text
-$skill-installer install https://github.com/<owner>/<repo>/tree/main/zven-imagegen
+$skill-installer install https://github.com/zvensmoluya/zven-imagegen/tree/main/zven-imagegen
 ```
 
 如果安装后 Codex 没有识别到，重启 Codex。
