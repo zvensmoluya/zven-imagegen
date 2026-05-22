@@ -1,0 +1,22 @@
+[project]
+name = "zven-imagegen"
+version = "0.1.0"
+description = "Codex skill for streamed image generation through dedicated OpenAI-compatible endpoints."
+readme = "README.md"
+license = { file = "LICENSE" }
+requires-python = ">=3.10"
+dependencies = [
+  "openai>=2.0.0",
+]
+
+[project.optional-dependencies]
+test = [
+  "pytest>=8.0.0",
+]
+
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

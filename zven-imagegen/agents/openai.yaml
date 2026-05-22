@@ -1,0 +1,4 @@
+interface:
+  display_name: "Zven Imagegen"
+  short_description: "Stream images through custom endpoints"
+  default_prompt: "Use $zven-imagegen to generate an image with the dedicated image endpoint."
