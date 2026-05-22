@@ -171,6 +171,6 @@ python -m pytest
 python "$HOME\.codex\skills\.system\skill-creator\scripts\quick_validate.py" .\zven-imagegen
 ```
 
-## License
+## 许可证
 
-MIT
+本仓库采用 MIT License，详见 [LICENSE](LICENSE)。
