@@ -9,11 +9,15 @@ from __future__ import annotations
 
 import argparse
 import base64
+import binascii
 import json
 import os
 import re
+import struct
 import sys
 import time
+import urllib.request
+import zlib
 from pathlib import Path
 from typing import Any, Iterable
 
@@ -25,6 +29,10 @@ DEFAULT_OUTPUT_FORMAT = "png"
 DEFAULT_OUTPUT_PATH = "output/imagegen/output.png"
 ENV_FILES = (".agentonlyenv", ".imagegen.env", ".env.imagegen")
 IMAGE_FIELDS = ("b64_json", "partial_image_b64", "image_b64")
+OUTPUT_INDEX_FIELDS = ("image_index", "output_index", "index")
+DATA_URI_RE = re.compile(r"^data:[^,]+;base64,", re.IGNORECASE)
+BASE64_SPACE_RE = re.compile(r"\s+")
+HTTP_URL_RE = re.compile(r"^https?://", re.IGNORECASE)
 
 
 def die(message: str, code: int = 1) -> None:
@@ -195,7 +203,107 @@ def align_output_paths(paths: list[Path], count: int) -> list[Path]:
     ]
 
 
-def write_images(images: Iterable[str], paths: list[Path], *, force: bool) -> None:
+def png_validation_error(data: bytes) -> str | None:
+    if not data.startswith(b"\x89PNG\r\n\x1a\n"):
+        return "missing PNG signature"
+
+    pos = 8
+    seen_ihdr = False
+    seen_idat = False
+    while pos + 8 <= len(data):
+        length = struct.unpack(">I", data[pos : pos + 4])[0]
+        chunk_type = data[pos + 4 : pos + 8]
+        chunk_start = pos + 8
+        chunk_end = chunk_start + length
+        crc_end = chunk_end + 4
+        if crc_end > len(data):
+            return f"truncated PNG chunk {chunk_type.decode('latin1', errors='replace')}"
+
+        expected_crc = struct.unpack(">I", data[chunk_end:crc_end])[0]
+        actual_crc = zlib.crc32(chunk_type + data[chunk_start:chunk_end]) & 0xFFFFFFFF
+        if expected_crc != actual_crc:
+            return f"bad PNG CRC in chunk {chunk_type.decode('latin1', errors='replace')}"
+
+        if chunk_type == b"IHDR":
+            if seen_ihdr or pos != 8:
+                return "invalid PNG IHDR position"
+            seen_ihdr = True
+        elif chunk_type == b"IDAT":
+            seen_idat = True
+        elif chunk_type == b"IEND":
+            if not seen_ihdr or not seen_idat:
+                return "PNG ended before image data"
+            if crc_end != len(data):
+                return "trailing bytes after PNG IEND"
+            return None
+
+        pos = crc_end
+
+    return "missing PNG IEND"
+
+
+def image_validation_error(data: bytes, output_format: str) -> str | None:
+    fmt = normalize_output_format(output_format)
+    if fmt == "png":
+        return png_validation_error(data)
+    if fmt == "jpeg":
+        if not (data.startswith(b"\xff\xd8") and data.endswith(b"\xff\xd9")):
+            return "invalid JPEG markers"
+        return None
+    if fmt == "webp":
+        if not (data.startswith(b"RIFF") and data[8:12] == b"WEBP"):
+            return "invalid WebP signature"
+        return None
+    return None
+
+
+def normalize_image_payload(value: str) -> str:
+    payload = DATA_URI_RE.sub("", value.strip(), count=1)
+    return BASE64_SPACE_RE.sub("", payload)
+
+
+def decode_image(b64_json: str, output_format: str) -> bytes:
+    if HTTP_URL_RE.match(b64_json.strip()):
+        with urllib.request.urlopen(b64_json.strip(), timeout=120) as response:
+            data = response.read()
+        error = image_validation_error(data, output_format)
+        if error:
+            die(f"Downloaded {output_format} image is invalid: {error}.")
+        return data
+
+    try:
+        data = base64.b64decode(normalize_image_payload(b64_json), validate=True)
+    except binascii.Error as exc:
+        die(f"Invalid base64 image data: {exc}")
+
+    error = image_validation_error(data, output_format)
+    if error:
+        die(f"Invalid {output_format} image data: {error}.")
+    return data
+
+
+def images_are_valid(images: Iterable[str], output_format: str) -> bool:
+    seen = False
+    for image in images:
+        seen = True
+        if HTTP_URL_RE.match(image.strip()):
+            return True
+        try:
+            data = base64.b64decode(normalize_image_payload(image), validate=True)
+        except binascii.Error:
+            return False
+        if image_validation_error(data, output_format):
+            return False
+    return seen
+
+
+def write_images(
+    images: Iterable[str],
+    paths: list[Path],
+    *,
+    force: bool,
+    output_format: str = DEFAULT_OUTPUT_FORMAT,
+) -> None:
     encoded_images = list(images)
     paths = align_output_paths(paths, len(encoded_images))
 
@@ -203,7 +311,7 @@ def write_images(images: Iterable[str], paths: list[Path], *, force: bool) -> No
         if path.exists() and not force:
             die(f"Refusing to overwrite existing file: {path}. Use --force.")
         path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_bytes(base64.b64decode(b64_json))
+        path.write_bytes(decode_image(b64_json, output_format))
         print(f"Wrote {path}", file=sys.stderr)
 
 
@@ -223,24 +331,55 @@ def common_payload(args: argparse.Namespace, prompt: str) -> dict[str, Any]:
 
 
 def event_type(event: Any) -> str:
-    if hasattr(event, "type"):
-        return str(event.type)
     if isinstance(event, dict):
-        return str(event.get("type", ""))
-    return ""
+        value = event.get("type", "")
+    elif hasattr(event, "type"):
+        value = event.type
+    else:
+        value = ""
+    if value is None:
+        return ""
+    return str(value)
+
+
+def event_to_plain(value: Any) -> Any:
+    if value is None or isinstance(value, (str, int, float, bool)):
+        return value
+    if isinstance(value, list):
+        return [event_to_plain(item) for item in value]
+    if isinstance(value, dict):
+        return {key: event_to_plain(item) for key, item in value.items()}
+    if hasattr(value, "to_dict"):
+        try:
+            return event_to_plain(value.to_dict(exclude_unset=False))
+        except TypeError:
+            return event_to_plain(value.to_dict())
+    if hasattr(value, "model_dump"):
+        try:
+            return event_to_plain(value.model_dump(exclude_unset=False))
+        except TypeError:
+            return event_to_plain(value.model_dump())
+    return value
 
 
 def event_value(event: Any, name: str, default: Any = None) -> Any:
+    plain = event_to_plain(event)
+    if isinstance(plain, dict) and name in plain:
+        return plain.get(name, default)
     if isinstance(event, dict):
         return event.get(name, default)
     return getattr(event, name, default)
 
 
 def collect_b64_images(value: Any) -> list[str]:
+    value = event_to_plain(value)
+
     if value is None:
         return []
     if isinstance(value, str):
-        return [value]
+        if DATA_URI_RE.match(value.strip()) or HTTP_URL_RE.match(value.strip()):
+            return [value]
+        return []
     if isinstance(value, list):
         images: list[str] = []
         for item in value:
@@ -251,6 +390,11 @@ def collect_b64_images(value: Any) -> list[str]:
         for field in IMAGE_FIELDS:
             if isinstance(value.get(field), str):
                 images.append(value[field])
+        url = value.get("url")
+        if isinstance(url, str) and (
+            DATA_URI_RE.match(url.strip()) or HTTP_URL_RE.match(url.strip())
+        ):
+            images.append(url)
         if "data" in value:
             images.extend(collect_b64_images(value["data"]))
         return images
@@ -266,15 +410,37 @@ def collect_b64_images(value: Any) -> list[str]:
     return images
 
 
+def event_output_index(event: Any) -> int | None:
+    for field in OUTPUT_INDEX_FIELDS:
+        value = event_value(event, field)
+        if isinstance(value, int):
+            return value
+        if isinstance(value, str) and value.isdigit():
+            return int(value)
+    return None
+
+
 def consume_stream(stream: Iterable[Any], *, label: str) -> list[str]:
     images: list[str] = []
+    partial_images: list[str] = []
+    partial_images_by_output: dict[int, str] = {}
     for event in stream:
         kind = event_type(event)
-        if kind.endswith(".partial_image"):
+        event_images = collect_b64_images(event)
+        is_partial = kind.endswith(".partial_image") or (
+            bool(event_images) and not kind.endswith(".completed")
+        )
+        if is_partial:
             partial_index = event_value(event, "partial_image_index", "?")
+            output_index = event_output_index(event)
+            if output_index is None:
+                partial_images.extend(event_images)
+            else:
+                for offset, partial in enumerate(event_images):
+                    partial_images_by_output[output_index + offset] = partial
             print(f"{label} partial image {partial_index} received", file=sys.stderr, flush=True)
         elif kind.endswith(".completed"):
-            images.extend(collect_b64_images(event))
+            images.extend(event_images)
             usage = event_value(event, "usage")
             usage_text = ""
             if usage is not None:
@@ -284,7 +450,80 @@ def consume_stream(stream: Iterable[Any], *, label: str) -> list[str]:
             print(f"{label} completed{usage_text}", file=sys.stderr, flush=True)
         elif kind:
             print(f"{label} event {kind}", file=sys.stderr, flush=True)
+    if not images:
+        if partial_images_by_output:
+            images = [
+                partial_images_by_output[index]
+                for index in sorted(partial_images_by_output)
+            ]
+        elif partial_images:
+            images = [partial_images[-1]]
+        if images:
+            warn(
+                "Stream ended without a completed event; using the latest partial "
+                "image as a candidate output."
+            )
     return images
+
+
+def item_image_candidates(item: Any) -> list[str]:
+    value = event_to_plain(item)
+    if not isinstance(value, dict):
+        return collect_b64_images(value)
+
+    candidates: list[str] = []
+    for field in IMAGE_FIELDS:
+        image = value.get(field)
+        if isinstance(image, str):
+            candidates.append(image)
+    url = value.get("url")
+    if isinstance(url, str) and (
+        DATA_URI_RE.match(url.strip()) or HTTP_URL_RE.match(url.strip())
+    ):
+        candidates.append(url)
+    return candidates
+
+
+def choose_image_candidate(item: Any, output_format: str) -> str | None:
+    for candidate in item_image_candidates(item):
+        if images_are_valid([candidate], output_format):
+            return candidate
+    return None
+
+
+def response_images(result: Any, output_format: str) -> list[str]:
+    value = event_to_plain(result)
+    if isinstance(value, dict) and isinstance(value.get("data"), list):
+        images: list[str] = []
+        for item in value["data"]:
+            image = choose_image_candidate(item, output_format)
+            if image:
+                images.append(image)
+        if images:
+            return images
+
+    images = []
+    for candidate in collect_b64_images(value):
+        if images_are_valid([candidate], output_format):
+            images.append(candidate)
+    return images
+
+
+def retry_generate_without_stream(
+    client: Any, payload: dict[str, Any], output_format: str
+) -> list[str]:
+    print("Retrying Image API without streaming for final image data.", file=sys.stderr)
+    result = client.images.generate(**payload)
+    return response_images(result, output_format)
+
+
+def retry_edit_without_stream(
+    client: Any, request: dict[str, Any], output_format: str
+) -> list[str]:
+    print("Retrying Image API edit without streaming for final image data.", file=sys.stderr)
+    request = {key: value for key, value in request.items() if key not in {"stream", "partial_images"}}
+    result = client.images.edit(**request)
+    return response_images(result, output_format)
 
 
 def create_client(api_key: str, base_url: str | None):
@@ -329,12 +568,18 @@ def run_generate(args: argparse.Namespace) -> None:
         request = dict(payload, stream=True, partial_images=args.partial_images)
         print("Calling Image API (streaming generation).", file=sys.stderr)
         images = consume_stream(client.images.generate(**request), label="[image]")
+        if not images_are_valid(images, output_format):
+            warn(
+                "Streamed image candidate was missing or invalid; requesting the "
+                "final image without streaming."
+            )
+            images = retry_generate_without_stream(client, payload, output_format)
     else:
         print("Calling Image API (generation).", file=sys.stderr)
         result = client.images.generate(**payload)
-        images = [item.b64_json for item in result.data]
+        images = response_images(result, output_format)
     print(f"Generation completed in {time.time() - started:.1f}s.", file=sys.stderr)
-    write_images(images, outputs, force=args.force)
+    write_images(images, outputs, force=args.force, output_format=output_format)
 
 
 def open_files(paths: list[Path]) -> list[Any]:
@@ -348,6 +593,14 @@ def close_files(handles: Iterable[Any]) -> None:
     for handle in handles:
         try:
             handle.close()
+        except Exception:
+            pass
+
+
+def rewind_files(handles: Iterable[Any]) -> None:
+    for handle in handles:
+        try:
+            handle.seek(0)
         except Exception:
             pass
 
@@ -397,12 +650,21 @@ def run_edit(args: argparse.Namespace) -> None:
             request["partial_images"] = args.partial_images
             print("Calling Image API (streaming edit).", file=sys.stderr)
             images = consume_stream(client.images.edit(**request), label="[edit]")
+            if not images_are_valid(images, output_format):
+                warn(
+                    "Streamed edit candidate was missing or invalid; requesting "
+                    "the final image without streaming."
+                )
+                rewind_files(handles)
+                if mask_handle:
+                    rewind_files([mask_handle])
+                images = retry_edit_without_stream(client, request, output_format)
         else:
             print("Calling Image API (edit).", file=sys.stderr)
             result = client.images.edit(**request)
-            images = [item.b64_json for item in result.data]
+            images = response_images(result, output_format)
         print(f"Edit completed in {time.time() - started:.1f}s.", file=sys.stderr)
-        write_images(images, outputs, force=args.force)
+        write_images(images, outputs, force=args.force, output_format=output_format)
     finally:
         close_files(handles)
         if mask_handle:

@@ -6,29 +6,24 @@ description: Generate or edit raster images through an OpenAI-compatible image e
 # Zven Imagegen
 
 Use this skill when image generation should go through a dedicated endpoint or
-base URL instead of Codex's default image tool. The bundled wrapper keeps
+base URL instead of Codex's default image tool. Always invoke the bundled
+cross-platform Python wrapper; do not search the current project for image
+helper scripts or use Codex's default image tool for this skill. The wrapper keeps
 `IMAGEGEN_OPENAI_API_KEY` and `IMAGEGEN_OPENAI_BASE_URL` separate from normal
-OpenAI/Codex settings, and the Python helper streams progress to keep long image
-requests active through proxies that dislike quiet connections.
+OpenAI/Codex settings, calls this skill's bundled helper, and streams progress
+by default to keep long image requests active through proxies that dislike quiet
+connections.
 
 ## Quick Start
 
-Run the PowerShell wrapper from any project:
+Run the Python wrapper from any project:
 
-```powershell
-powershell -ExecutionPolicy Bypass -File "$HOME\.agents\skills\zven-imagegen\scripts\invoke-imagegen.ps1" generate `
-  --prompt "A clean product cutout of a ceramic mug, no text, no logo" `
-  --size 1024x1024 `
-  --quality low `
-  --out output\imagegen\mug.png
-```
-
-Or run the streamed helper directly:
-
-```powershell
-python "$HOME\.agents\skills\zven-imagegen\scripts\imagegen_stream.py" generate `
-  --prompt "A clean product cutout of a ceramic mug, no text, no logo" `
-  --out output\imagegen\mug.png
+```bash
+python "$HOME/.agents/skills/zven-imagegen/scripts/invoke_imagegen.py" generate \
+  --prompt "A clean product cutout of a ceramic mug, no text, no logo" \
+  --size 1024x1024 \
+  --quality low \
+  --out output/imagegen/mug.png
 ```
 
 ## Credential Precedence
@@ -57,8 +52,8 @@ IMAGEGEN_OPENAI_API_KEY=your-image-api-key
 
 1. Write final image assets under `output/imagegen/` unless the user asks for
    another path.
-2. Use `generate`, `edit`, or `generate-batch` on
-   `scripts/imagegen_stream.py` for streamed requests.
+2. Run `scripts/invoke_imagegen.py` with `generate`, `edit`, or
+   `generate-batch`. The wrapper calls the bundled helper from this skill.
 3. Prefer `IMAGEGEN_OPENAI_API_KEY` and `IMAGEGEN_OPENAI_BASE_URL` when the
    image endpoint differs from the rest of Codex.
 4. Add `.agentonlyenv`, `.imagegen.env`, or `.env.imagegen` to the project root
@@ -68,70 +63,60 @@ IMAGEGEN_OPENAI_API_KEY=your-image-api-key
 
 ## Wrapper Behavior
 
-`scripts/invoke-imagegen.ps1` forwards all CLI arguments. It uses:
+`scripts/invoke_imagegen.py` forwards all CLI arguments to this skill's bundled
+`scripts/imagegen_stream.py`. It intentionally does not auto-discover
+`scripts/imagegen_stream.py` in the current project; normal user projects should
+not have this helper.
 
-1. A repo-local `scripts/imagegen_stream.py` if the current project provides one
-2. This skill's bundled `scripts/imagegen_stream.py`
-3. The installed `imagegen` skill CLI only when a forwarded option is not
-   supported by the streamed helper
+`scripts/invoke-imagegen.ps1` is a Windows PowerShell compatibility wrapper, not
+the default skill entrypoint.
 
 The streamed helper supports `generate`, `edit`, and `generate-batch`.
 Generation and editing default to `--stream`; use `--no-stream` only when a
 provider does not support streaming.
+For OpenAI-compatible endpoints that stream partial images but omit a completed
+event, the helper treats the latest partial image only as a candidate. It
+validates image bytes before writing files; if the streamed candidate is missing
+or invalid, it retries once without streaming and writes the first valid
+`b64_json`, data URI, or image URL returned by the endpoint.
 
-Calls using original imagegen-only prompt-augmentation or downscaling flags fall
-back to the installed imagegen CLI when available.
-
-For Python, the wrapper prefers the current project's `.venv`, then `python` on
-`PATH`. Codex may already have Python because bundled skills use it, but the
-`openai` package is not guaranteed in the chosen environment. If a live call
-reports a missing dependency, install it with `python -m pip install openai` in
-that environment.
+The wrapper uses a managed `.venv` inside the skill folder and installs
+`openai>=2.0.0` there on first live use if needed. Dry-runs skip the managed
+environment and dependency install. Do not ask the user to manage Python
+packages for this skill unless environment creation or package installation
+fails. Set `IMAGEGEN_PYTHON` only when the wrapper cannot find Python 3.10+
+automatically.
 
 ## Common Commands
 
 Dry-run without a network call:
 
-```powershell
-powershell -ExecutionPolicy Bypass -File "$HOME\.agents\skills\zven-imagegen\scripts\invoke-imagegen.ps1" generate `
-  --prompt "Test image" `
-  --out output\imagegen\test.png `
-  --dry-run
+```bash
+python "$HOME/.agents/skills/zven-imagegen/scripts/invoke_imagegen.py" generate --prompt "Test image" --out output/imagegen/test.png --dry-run
 ```
 
 Generate with streamed progress:
 
-```powershell
-powershell -ExecutionPolicy Bypass -File "$HOME\.agents\skills\zven-imagegen\scripts\invoke-imagegen.ps1" generate `
-  --prompt "A polished landing-page hero image of a matte ceramic mug" `
-  --size 1536x1024 `
-  --quality medium `
-  --partial-images 1 `
-  --out output\imagegen\mug-hero.png
+```bash
+python "$HOME/.agents/skills/zven-imagegen/scripts/invoke_imagegen.py" generate --prompt "A polished landing-page hero image of a matte ceramic mug" --size 1536x1024 --quality medium --partial-images 1 --out output/imagegen/mug-hero.png
 ```
 
 Edit an existing image:
 
-```powershell
-powershell -ExecutionPolicy Bypass -File "$HOME\.agents\skills\zven-imagegen\scripts\invoke-imagegen.ps1" edit `
-  --image input.png `
-  --prompt "Replace only the background with a warm studio backdrop" `
-  --out output\imagegen\edited.png
+```bash
+python "$HOME/.agents/skills/zven-imagegen/scripts/invoke_imagegen.py" edit --image input.png --prompt "Replace only the background with a warm studio backdrop" --out output/imagegen/edited.png
 ```
 
 Generate from JSONL:
 
-```powershell
-powershell -ExecutionPolicy Bypass -File "$HOME\.agents\skills\zven-imagegen\scripts\invoke-imagegen.ps1" generate-batch `
-  --input tmp\imagegen\prompts.jsonl `
-  --out-dir output\imagegen\batch
+```bash
+python "$HOME/.agents/skills/zven-imagegen/scripts/invoke_imagegen.py" generate-batch --input tmp/imagegen/prompts.jsonl --out-dir output/imagegen/batch
 ```
 
 ## Notes
 
-- The helper requires the Python `openai` package for live calls.
+- The wrapper prepares the Python `openai` package for live calls.
 - `--partial-images` must be between `0` and `3`.
 - `--output-format` may be `png`, `jpeg`, `jpg`, or `webp`.
 - `--force` is required before overwriting an existing output.
-- The streamed helper intentionally avoids Codex system-skill patches, so it is
-  stable across Codex updates.
+- The helper defaults to streamed generation and editing.

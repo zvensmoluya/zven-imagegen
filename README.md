@@ -52,18 +52,13 @@ Copy-Item -Recurse .\zven-imagegen "$HOME\.agents\skills\zven-imagegen"
 zven-imagegen/scripts/imagegen_stream.py
 ```
 
-wrapper 会按这个顺序找 Python：
+普通项目里不需要、也不应该再放一份 `scripts/imagegen_stream.py`。Codex 使用这个
+skill 时默认调用跨平台的 `invoke_imagegen.py`，wrapper 会固定调用 skill 自己内置的
+helper。`invoke-imagegen.ps1` 只是 Windows PowerShell 兼容入口。
 
-1. 当前项目的 `.venv`
-2. `PATH` 上的 `python`
-
-Codex 通常有 Python，因为系统 skill 也会用 Python。不过 `openai` 包不一定装在
-wrapper 实际选中的那个环境里。建议先跑 dry-run；真正生图时如果 Codex 报缺少
-`openai`，让它在对应环境里执行：
-
-```powershell
-python -m pip install openai
-```
+wrapper 会在 skill 目录里创建一个托管 `.venv`，首次真实调用时自动安装
+`openai>=2.0.0`。只有在机器上找不到 Python 时，才需要设置 `IMAGEGEN_PYTHON`
+指向 Python 3.10+ 可执行文件。
 
 ## 配置
 
@@ -95,34 +90,34 @@ IMAGEGEN_OPENAI_API_KEY=your-image-api-key
 
 先 dry-run，确认路由、参数和输出路径：
 
-```powershell
-powershell -ExecutionPolicy Bypass -File "$HOME\.agents\skills\zven-imagegen\scripts\invoke-imagegen.ps1" generate `
-  --prompt "A small leaf sticker, soft pastel illustration, no text" `
-  --out output\imagegen\leaf.png `
+```bash
+python "$HOME/.agents/skills/zven-imagegen/scripts/invoke_imagegen.py" generate \
+  --prompt "A small leaf sticker, soft pastel illustration, no text" \
+  --out output/imagegen/leaf.png \
   --dry-run
 ```
 
 流式生成：
 
-```powershell
-powershell -ExecutionPolicy Bypass -File "$HOME\.agents\skills\zven-imagegen\scripts\invoke-imagegen.ps1" generate `
-  --prompt "A small leaf sticker, soft pastel illustration, no text" `
-  --size 1024x1024 `
-  --quality low `
-  --partial-images 1 `
-  --out output\imagegen\leaf.png
+```bash
+python "$HOME/.agents/skills/zven-imagegen/scripts/invoke_imagegen.py" generate \
+  --prompt "A small leaf sticker, soft pastel illustration, no text" \
+  --size 1024x1024 \
+  --quality low \
+  --partial-images 1 \
+  --out output/imagegen/leaf.png
 ```
 
 编辑图片：
 
-```powershell
-powershell -ExecutionPolicy Bypass -File "$HOME\.agents\skills\zven-imagegen\scripts\invoke-imagegen.ps1" edit `
-  --image input.png `
-  --prompt "Change only the background to a clean white studio backdrop" `
-  --out output\imagegen\edited.png
+```bash
+python "$HOME/.agents/skills/zven-imagegen/scripts/invoke_imagegen.py" edit \
+  --image input.png \
+  --prompt "Change only the background to a clean white studio backdrop" \
+  --out output/imagegen/edited.png
 ```
 
-也可以直接跑内置 helper：
+调试 skill 本身时，也可以直接跑内置 helper：
 
 ```powershell
 python .\zven-imagegen\scripts\imagegen_stream.py generate `
@@ -136,13 +131,15 @@ python .\zven-imagegen\scripts\imagegen_stream.py generate `
 生成或编辑图片，并且场景涉及自定义 `base_url`、中转、Cloudflare、独立生图 key、
 `IMAGEGEN_*` 配置或需要流式防断连时，Codex 就应该触发这个 skill。
 
-`invoke-imagegen.ps1` 会转发所有参数，并按顺序选择：
+`invoke_imagegen.py` 会转发所有参数，并按顺序选择：
 
-1. 当前项目自己的 `scripts/imagegen_stream.py`
-2. 本 skill 内置的 `scripts/imagegen_stream.py`
-3. 系统 `imagegen` skill 的 CLI 回退路径
+1. 本 skill 内置的 `scripts/imagegen_stream.py`
 
-所以普通用户只要安装 skill，不需要再把脚本复制到自己的项目里。
+它不会自动发现当前项目里的 `scripts/imagegen_stream.py`，也不会回退到系统
+`imagegen` skill。普通用户只要安装 skill，不需要再把脚本复制到自己的项目里。
+生成和编辑默认都是流式；只有端点明确不支持 stream 时才加 `--no-stream`。
+
+`invoke-imagegen.ps1` 只是在 Windows 上调用 `invoke_imagegen.py` 的兼容 shim。
 
 ## 凭据优先级
 
@@ -160,8 +157,9 @@ Python helper 自身只主动读取 `IMAGEGEN_*` 和项目私有 env 文件；wr
 ## 开发与验证
 
 ```powershell
+python .\zven-imagegen\scripts\invoke_imagegen.py generate --prompt "test" --dry-run
+powershell -ExecutionPolicy Bypass -File .\zven-imagegen\scripts\invoke-imagegen.ps1 generate --prompt "test" --dry-run
 python -m py_compile .\zven-imagegen\scripts\imagegen_stream.py
-python .\zven-imagegen\scripts\imagegen_stream.py generate --prompt "test" --dry-run
 python -m pytest
 ```
 
