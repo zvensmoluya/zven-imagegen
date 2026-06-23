@@ -19,7 +19,7 @@ import time
 import urllib.request
 import zlib
 from pathlib import Path
-from typing import Any, Iterable
+from typing import Any, Iterable, NamedTuple
 
 
 DEFAULT_MODEL = "gpt-image-2"
@@ -33,6 +33,14 @@ OUTPUT_INDEX_FIELDS = ("image_index", "output_index", "index")
 DATA_URI_RE = re.compile(r"^data:[^,]+;base64,", re.IGNORECASE)
 BASE64_SPACE_RE = re.compile(r"\s+")
 HTTP_URL_RE = re.compile(r"^https?://", re.IGNORECASE)
+
+
+class StreamOutcome(NamedTuple):
+    images: list[str]
+    completed: bool
+    saw_events: bool
+    error: Exception | None
+    used_direct_response: bool
 
 
 def die(message: str, code: int = 1) -> None:
@@ -420,36 +428,90 @@ def event_output_index(event: Any) -> int | None:
     return None
 
 
-def consume_stream(stream: Iterable[Any], *, label: str) -> list[str]:
+def response_content_type(response: Any) -> str:
+    headers = getattr(response, "headers", None)
+    if headers is None:
+        return ""
+    try:
+        value = headers.get("content-type", "")
+    except Exception:
+        return ""
+    return str(value or "")
+
+
+def close_stream(stream: Any) -> None:
+    closer = getattr(stream, "close", None)
+    if callable(closer):
+        try:
+            closer()
+        except Exception:
+            pass
+
+
+def direct_response_images(stream: Any, *, label: str, output_format: str) -> list[str] | None:
+    response = getattr(stream, "response", None)
+    content_type = response_content_type(response).lower()
+    if not response or not content_type or "text/event-stream" in content_type:
+        return None
+
+    print(
+        f"{label} provider returned {content_type}; reading the final response body directly.",
+        file=sys.stderr,
+        flush=True,
+    )
+    body = response.read()
+    if not body.strip():
+        return []
+    try:
+        payload = json.loads(body)
+    except json.JSONDecodeError:
+        warn(
+            f"{label} provider returned a non-SSE response that was not valid JSON; "
+            "falling back to a non-stream retry."
+        )
+        return []
+    return response_images(payload, output_format)
+
+
+def consume_stream_outcome(stream: Iterable[Any], *, label: str) -> StreamOutcome:
     images: list[str] = []
     partial_images: list[str] = []
     partial_images_by_output: dict[int, str] = {}
-    for event in stream:
-        kind = event_type(event)
-        event_images = collect_b64_images(event)
-        is_partial = kind.endswith(".partial_image") or (
-            bool(event_images) and not kind.endswith(".completed")
-        )
-        if is_partial:
-            partial_index = event_value(event, "partial_image_index", "?")
-            output_index = event_output_index(event)
-            if output_index is None:
-                partial_images.extend(event_images)
-            else:
-                for offset, partial in enumerate(event_images):
-                    partial_images_by_output[output_index + offset] = partial
-            print(f"{label} partial image {partial_index} received", file=sys.stderr, flush=True)
-        elif kind.endswith(".completed"):
-            images.extend(event_images)
-            usage = event_value(event, "usage")
-            usage_text = ""
-            if usage is not None:
-                total_tokens = event_value(usage, "total_tokens")
-                if total_tokens is not None:
-                    usage_text = f", total_tokens={total_tokens}"
-            print(f"{label} completed{usage_text}", file=sys.stderr, flush=True)
-        elif kind:
-            print(f"{label} event {kind}", file=sys.stderr, flush=True)
+    saw_events = False
+    completed = False
+    error: Exception | None = None
+    try:
+        for event in stream:
+            saw_events = True
+            kind = event_type(event)
+            event_images = collect_b64_images(event)
+            is_partial = kind.endswith(".partial_image") or (
+                bool(event_images) and not kind.endswith(".completed")
+            )
+            if is_partial:
+                partial_index = event_value(event, "partial_image_index", "?")
+                output_index = event_output_index(event)
+                if output_index is None:
+                    partial_images.extend(event_images)
+                else:
+                    for offset, partial in enumerate(event_images):
+                        partial_images_by_output[output_index + offset] = partial
+                print(f"{label} partial image {partial_index} received", file=sys.stderr, flush=True)
+            elif kind.endswith(".completed"):
+                completed = True
+                images.extend(event_images)
+                usage = event_value(event, "usage")
+                usage_text = ""
+                if usage is not None:
+                    total_tokens = event_value(usage, "total_tokens")
+                    if total_tokens is not None:
+                        usage_text = f", total_tokens={total_tokens}"
+                print(f"{label} completed{usage_text}", file=sys.stderr, flush=True)
+            elif kind:
+                print(f"{label} event {kind}", file=sys.stderr, flush=True)
+    except Exception as exc:
+        error = exc
+        warn(f"{label} stream interrupted: {exc.__class__.__name__}: {exc}")
     if not images:
         if partial_images_by_output:
             images = [
@@ -459,11 +521,45 @@ def consume_stream(stream: Iterable[Any], *, label: str) -> list[str]:
         elif partial_images:
             images = [partial_images[-1]]
         if images:
-            warn(
-                "Stream ended without a completed event; using the latest partial "
-                "image as a candidate output."
+            if error is None:
+                warn(
+                    "Stream ended without a completed event; using the latest partial "
+                    "image as a candidate output."
+                )
+            else:
+                warn(
+                    "Stream was interrupted before a completed event; using the latest "
+                    "partial image as a candidate output."
+                )
+    if not saw_events and not images and error is None:
+        warn(f"{label} stream returned no events.")
+    return StreamOutcome(
+        images=images,
+        completed=completed,
+        saw_events=saw_events,
+        error=error,
+        used_direct_response=False,
+    )
+
+
+def consume_stream(stream: Iterable[Any], *, label: str) -> list[str]:
+    return consume_stream_outcome(stream, label=label).images
+
+
+def read_stream_outcome(stream: Any, *, label: str, output_format: str) -> StreamOutcome:
+    try:
+        images = direct_response_images(stream, label=label, output_format=output_format)
+        if images is not None:
+            return StreamOutcome(
+                images=images,
+                completed=bool(images),
+                saw_events=False,
+                error=None,
+                used_direct_response=True,
             )
-    return images
+        return consume_stream_outcome(stream, label=label)
+    finally:
+        close_stream(stream)
 
 
 def item_image_candidates(item: Any) -> list[str]:
@@ -567,11 +663,16 @@ def run_generate(args: argparse.Namespace) -> None:
     if args.stream:
         request = dict(payload, stream=True, partial_images=args.partial_images)
         print("Calling Image API (streaming generation).", file=sys.stderr)
-        images = consume_stream(client.images.generate(**request), label="[image]")
-        if not images_are_valid(images, output_format):
+        outcome = read_stream_outcome(
+            client.images.generate(**request),
+            label="[image]",
+            output_format=output_format,
+        )
+        images = outcome.images
+        if outcome.error is not None or not images_are_valid(images, output_format):
             warn(
-                "Streamed image candidate was missing or invalid; requesting the "
-                "final image without streaming."
+                "Streamed image candidate was missing, interrupted, or invalid; "
+                "requesting the final image without streaming."
             )
             images = retry_generate_without_stream(client, payload, output_format)
     else:
@@ -649,11 +750,16 @@ def run_edit(args: argparse.Namespace) -> None:
             request["stream"] = True
             request["partial_images"] = args.partial_images
             print("Calling Image API (streaming edit).", file=sys.stderr)
-            images = consume_stream(client.images.edit(**request), label="[edit]")
-            if not images_are_valid(images, output_format):
+            outcome = read_stream_outcome(
+                client.images.edit(**request),
+                label="[edit]",
+                output_format=output_format,
+            )
+            images = outcome.images
+            if outcome.error is not None or not images_are_valid(images, output_format):
                 warn(
-                    "Streamed edit candidate was missing or invalid; requesting "
-                    "the final image without streaming."
+                    "Streamed edit candidate was missing, interrupted, or invalid; "
+                    "requesting the final image without streaming."
                 )
                 rewind_files(handles)
                 if mask_handle:

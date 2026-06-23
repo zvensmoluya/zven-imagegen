@@ -138,6 +138,8 @@ python .\zven-imagegen\scripts\imagegen_stream.py generate `
 它不会自动发现当前项目里的 `scripts/imagegen_stream.py`，也不会回退到系统
 `imagegen` skill。普通用户只要安装 skill，不需要再把脚本复制到自己的项目里。
 生成和编辑默认都是流式；只有端点明确不支持 stream 时才加 `--no-stream`。
+如果某些兼容端点接受 `stream=true`，但实际上返回的是完整 `application/json`
+而不是 SSE，helper 会直接从这次响应里提取最终图片，不会因为“空流”再重复发一遍请求。
 
 `invoke-imagegen.ps1` 只是在 Windows 上调用 `invoke_imagegen.py` 的兼容 shim。
 
@@ -153,6 +155,20 @@ wrapper 会按顺序读取：
 
 Python helper 自身只主动读取 `IMAGEGEN_*` 和项目私有 env 文件；wrapper 会在子进程里
 把这些值映射成 `OPENAI_API_KEY` 和 `OPENAI_BASE_URL`。
+
+## 流式兼容说明
+
+有些 OpenAI 兼容上游的 Images API 流式语义并不严格一致，常见情况包括：
+
+- 只返回 partial image，不发送 completed 事件
+- `stream=true` 但响应头和响应体仍然是完整 JSON，而不是 `text/event-stream`
+- 流中途被代理、网关或网络抖动打断
+
+当前 helper 的处理策略是：
+
+- 遇到非 SSE 的 JSON 响应时，直接从同一次响应里提取最终图片，避免重复请求
+- 正常结束但没有 completed 事件时，把最后一个可用 partial 当作 candidate
+- 如果流中断、candidate 缺失或图片字节无效，再自动回退一次非流式请求
 
 ## 开发与验证
 

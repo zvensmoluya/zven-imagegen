@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import base64
 import importlib.util
+import json
 import struct
 import zlib
 from pathlib import Path
@@ -32,6 +33,31 @@ def tiny_png() -> bytes:
     ihdr = struct.pack(">IIBBBBB", 1, 1, 8, 6, 0, 0, 0)
     idat = zlib.compress(b"\x00\x00\x00\x00\x00")
     return b"\x89PNG\r\n\x1a\n" + png_chunk(b"IHDR", ihdr) + png_chunk(b"IDAT", idat) + png_chunk(b"IEND", b"")
+
+
+class FakeResponse:
+    def __init__(self, body: bytes, content_type: str) -> None:
+        self._body = body
+        self.headers = {"content-type": content_type}
+
+    def read(self) -> bytes:
+        return self._body
+
+
+class FakeStream:
+    def __init__(self, events: list[object], response: FakeResponse | None = None) -> None:
+        self._events = events
+        self.response = response
+        self.closed = False
+
+    def __iter__(self):
+        for event in self._events:
+            if isinstance(event, BaseException):
+                raise event
+            yield event
+
+    def close(self) -> None:
+        self.closed = True
 
 
 def test_parse_dotenv_accepts_export_and_quotes(tmp_path: Path) -> None:
@@ -147,6 +173,39 @@ def test_consume_stream_keeps_latest_partial_per_output(capsys: object) -> None:
 
     assert images == ["first-finalish", "second-finalish"]
     assert "without a completed event" in capsys.readouterr().err
+
+
+def test_consume_stream_outcome_keeps_partial_when_stream_interrupts(capsys: object) -> None:
+    helper = load_helper()
+    stream = FakeStream(
+        [
+            {"type": "image_generation.partial_image", "partial_image_index": 0, "b64_json": "draft"},
+            RuntimeError("socket closed"),
+        ]
+    )
+
+    outcome = helper.consume_stream_outcome(stream, label="[test]")
+
+    assert outcome.images == ["draft"]
+    assert outcome.error is not None
+    stderr = capsys.readouterr().err
+    assert "stream interrupted" in stderr
+    assert "before a completed event" in stderr
+
+
+def test_read_stream_outcome_uses_json_body_when_provider_ignores_sse(capsys: object) -> None:
+    helper = load_helper()
+    image = base64.b64encode(tiny_png()).decode("ascii")
+    body = json.dumps({"data": [{"b64_json": image}]}).encode("utf-8")
+    stream = FakeStream([], response=FakeResponse(body, "application/json"))
+
+    outcome = helper.read_stream_outcome(stream, label="[test]", output_format="png")
+
+    assert outcome.images == [image]
+    assert outcome.completed is True
+    assert outcome.used_direct_response is True
+    assert stream.closed is True
+    assert "provider returned application/json" in capsys.readouterr().err
 
 
 def test_write_images_expands_single_output_path(tmp_path: Path) -> None:

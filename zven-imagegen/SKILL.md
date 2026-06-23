@@ -75,8 +75,11 @@ The streamed helper supports `generate`, `edit`, and `generate-batch`.
 Generation and editing default to `--stream`; use `--no-stream` only when a
 provider does not support streaming.
 For OpenAI-compatible endpoints that stream partial images but omit a completed
-event, the helper treats the latest partial image only as a candidate. It
-validates image bytes before writing files; if the streamed candidate is missing
+event, the helper treats the latest partial image only as a candidate. Some
+providers also accept `stream=true` but return a final `application/json`
+payload instead of SSE; the helper detects that shape and reads the final image
+from the same response without sending a second request. It validates image
+bytes before writing files; if the streamed candidate is missing, interrupted,
 or invalid, it retries once without streaming and writes the first valid
 `b64_json`, data URI, or image URL returned by the endpoint.
 
