@@ -44,6 +44,49 @@ Copy-Item -Recurse .\zven-imagegen "$HOME\.agents\skills\zven-imagegen"
 一些旧版本地 Codex 环境也会扫描 `$HOME\.codex\skills`。只有在你的 Codex
 确实使用这个目录时，才优先放那里。
 
+## 在 Claude Code 中使用
+
+这个 skill 的核心只是一个跨平台 Python 包装脚本，跟具体的 agent harness 无关，
+所以 Claude Code 也能直接使用。`SKILL.md` 的 frontmatter（`name` + `description`）
+正好就是 Claude Code Agent Skills 的格式，无需改写。
+
+把 `zven-imagegen` 文件夹复制到 Claude Code 的 skill 目录即可。
+
+个人级（所有项目可用）：
+
+```powershell
+New-Item -ItemType Directory -Force "$HOME\.claude\skills" | Out-Null
+Copy-Item -Recurse .\zven-imagegen "$HOME\.claude\skills\zven-imagegen"
+```
+
+```bash
+mkdir -p "$HOME/.claude/skills"
+cp -r ./zven-imagegen "$HOME/.claude/skills/zven-imagegen"
+```
+
+只给某个项目用（可随仓库提交、团队共享）：
+
+```text
+.claude/skills/zven-imagegen
+```
+
+安装后，在 Claude Code 里可以让模型触发 `zven-imagegen`，或直接用 Bash 调用包装脚本
+（注意路径前缀换成 `~/.claude/skills/`）：
+
+```bash
+python "$HOME/.claude/skills/zven-imagegen/scripts/invoke_imagegen.py" generate \
+  --prompt "A small leaf sticker, soft pastel illustration, no text" \
+  --size 1024x1024 \
+  --quality low \
+  --out output/imagegen/leaf.png
+```
+
+凭据解析对 Claude Code 完全一致：优先 `IMAGEGEN_OPENAI_API_KEY` /
+`IMAGEGEN_OPENAI_BASE_URL` 环境变量，其次是项目根目录的 `.agentonlyenv`、
+`.imagegen.env` 或 `.env.imagegen`。Codex 专属的 `auth.json` / `config.toml` 兜底
+在没有 Codex 的机器上会自动跳过，不影响使用，也不会报错。`agents/openai.yaml`
+是 Codex 专属清单，Claude Code 会忽略它，同样无害。
+
 ## Python 环境
 
 脚本已经内置在 skill 里：

@@ -12,6 +12,9 @@ venv/
 .imagegen.env
 .env.imagegen
 
+# Local-only Claude Code settings (dev convenience, not part of the skill)
+.claude/settings.local.json
+
 tmp/
 output/imagegen/*.png
 output/imagegen/*.jpg

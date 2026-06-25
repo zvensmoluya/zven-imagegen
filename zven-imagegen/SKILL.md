@@ -26,6 +26,12 @@ python "$HOME/.agents/skills/zven-imagegen/scripts/invoke_imagegen.py" generate 
   --out output/imagegen/mug.png
 ```
 
+> Install path: examples use the Codex skill directory `$HOME/.agents/skills/`.
+> When this skill is installed under Claude Code, replace that prefix with
+> `$HOME/.claude/skills/` (personal) or the project's `.claude/skills/`
+> (project-scoped). Everything else — flags, credentials, and behavior — is the
+> same.
+
 ## Credential Precedence
 
 The wrapper resolves settings in this order:
